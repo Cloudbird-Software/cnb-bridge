@@ -3,9 +3,10 @@ version: 1
 accounts:
   - alias: xuemei
     secret_ref: CNB_TOKEN_XUEMEI
-    description: 雪媚账号（令牌名 all）
+    description: 雪媚账号 Olivia_Zhu（cnb.dUQ9MKJuAGA，令牌名 all）
     quota_monthly_core_hours: 1600
-    status: active
+    status: pending-access   # 2026-08-25 实测：token 有效但对 talk 窗口仓 404——需 owner 在 CNB 侧
+                             # 将其加入 Cloudbird-Software 组（或对 talk 授权）后置 active
     added_at: "2026-08-25"
   - alias: p11
     secret_ref: CNB_TOKEN_P11

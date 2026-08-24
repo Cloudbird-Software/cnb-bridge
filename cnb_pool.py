@@ -191,6 +191,11 @@ class CnbClient:
     def list_issues(self) -> list:
         return self._request(f"{self.base}/-/issues?page_size=200") or []
 
+    def create_issue(self, title: str, body: str = "") -> dict:
+        """自动补开窗口（实测先例：旧 #1-#100 池已清理，窗口按需开——'swarm v2 自动补开'）。"""
+        return self._request(f"{self.base}/-/issues",
+                             {"title": title, "body": body or "调度窗口：本 issue 即一次任务通道（@CodeBuddy 评论触发 NPC，回复后窗口回到空闲）"})
+
     def comments(self, issue_n: int) -> list:
         return self._request(f"{self.base}/-/issues/{issue_n}/comments?page_size=50") or []
 
@@ -234,8 +239,10 @@ def windows_status(client: CnbClient, max_windows: int = MAX_WINDOWS) -> list:
     issues = client.list_issues()
     nums = set()
     for i in issues:
+        if i.get("state", "open") != "open":
+            continue   # 关闭窗口不复用（历史窗口号可能 >100——池实测 2026-08-25）
         n = int(i.get("number") or 0)
-        if 1 <= n <= max_windows:
+        if n > 0:
             nums.add(n)
     if not nums:
         nums = set(range(1, max_windows + 1))  # 列表为空时退化为直查 #1-#N
@@ -409,11 +416,22 @@ class AccountPool:
                 f"账号 {chosen.alias} 占用 {chosen_busy} 窗口，已达单账号并发上限 {cap}"
             )
         free = [s["number"] for s in chosen_statuses if s["free"]]
-        if not free:
+        if free:
+            window = free[0]  # 升序取最靠前的空闲窗口（确定性，便于对账）
+            window_created = False
+        elif chosen_busy < cap:
+            # 无空闲窗口但未达并发上限 → 自动补开（实测先例：旧 #1-#100 预置池已
+            # 清理，窗口按需开——'swarm v2 自动补开'；开窗即占用，计数与既有窗口同口径）
+            iss = self.client_for(chosen).create_issue(
+                f"调度窗口(自动补开 {run_id})")
+            window = int(iss.get("number") or 0)
+            if window <= 0:
+                raise DispatchError(f"自动补开窗口失败：API 响应无 number（{str(iss)[:120]}）")
+            window_created = True
+        else:
             raise DispatchError(
-                f"账号 {chosen.alias}：{MAX_WINDOWS} 个窗口全部占用中——稍后重试或换账号"
+                f"账号 {chosen.alias}：窗口全部占用且已达单账号并发上限 {cap}——稍后重试或换账号"
             )
-        window = free[0]  # 升序取最靠前的空闲窗口（确定性，便于对账）
         body = build_task_body(task_body, tier, run_id)
         self.client_for(chosen).post_comment(window, body, work_mode=True)
         return {
@@ -422,6 +440,7 @@ class AccountPool:
             "run_id": run_id,
             "posted_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "tier": tier,
+            "window_created": window_created,
         }
 
     def collect(
@@ -532,12 +551,19 @@ def main(argv: list[str] | None = None) -> int:
             # 审计契约行（cnb-audit grep 消费）：仅在字段齐备可算时输出数值——
             # 未知结构不假装（remaining_pct 行缺席=审计不告警，fail-open 面由
             # cnb-audit 的"配额查询失败即红"与周人工核对面兜底）
+            # 实测结构（2026-08-25 p11）：{dev_in_sec: {total, free}, ci_in_sec: {…}}——嵌套优先
             dev = q.get("dev_in_sec") if isinstance(q, dict) else None
-            used = None
-            if isinstance(q, dict):
-                used = q.get("used_in_sec") or q.get("dev_in_sec_used")                        or (q.get("used") or {}).get("dev_in_sec")                        if isinstance(q.get("used"), dict) else q.get("used_in_sec")
-            if isinstance(dev, (int, float)) and dev > 0 and isinstance(used, (int, float)):
-                print(f"account={acct.alias} remaining_pct={max(0, round((dev - used) / dev * 100))}")
+            if isinstance(dev, dict):
+                tot, free = dev.get("total"), dev.get("free")
+                if isinstance(tot, (int, float)) and tot > 0 and isinstance(free, (int, float)):
+                    print(f"account={acct.alias} remaining_pct={max(0, round(free / tot * 100))}")
+            elif isinstance(dev, (int, float)) and dev > 0:
+                used = None
+                if isinstance(q, dict):
+                    u = q.get("used_in_sec") or q.get("dev_in_sec_used")
+                    used = u if isinstance(u, (int, float)) else None
+                if used is not None:
+                    print(f"account={acct.alias} remaining_pct={max(0, round((dev - used) / dev * 100))}")
         elif args.cmd == "windows":
             acct = pool.pick(args.account)
             sts = windows_status(pool.client_for(acct))

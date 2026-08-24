@@ -1,0 +1,23 @@
+version: 1
+# token 永不入 git：Actions/本地经 env CNB_TOKEN_<ALIAS> 注入（org secret 同名）
+accounts:
+  - alias: xuemei
+    secret_ref: CNB_TOKEN_XUEMEI
+    description: 雪媚账号 Olivia_Zhu（cnb.dUQ9MKJuAGA，令牌名 all）
+    quota_monthly_core_hours: 1600
+    status: pending-access   # 2026-08-25 实测：token 有效但对 talk 窗口仓 404——需 owner 在 CNB 侧
+                             # 将其加入 Cloudbird-Software 组（或对 talk 授权）后置 active
+    added_at: "2026-08-25"
+  - alias: p11
+    secret_ref: CNB_TOKEN_P11
+    description: 第二账号（令牌名 11）
+    quota_monthly_core_hours: 1600
+    status: active
+    added_at: "2026-08-25"
+dispatch:
+  repo: Cloudbird-Software/talk
+  windows: "#1-#100（issue 即窗口）"
+  default_tier: light        # light=1C 默认 / std=2C 须理由 / heavy=4C 须 ADR / 8C 禁用
+  max_concurrent_per_account: 8
+  poll_interval_sec: 20
+  reply_timeout_sec: 600

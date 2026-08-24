@@ -1,0 +1,40 @@
+# work-inbox.yaml —— PM 自起工作发现协议种子（IR-0004 D16）
+# 属 cnb-bridge 可删除层：本文件只是协议在本工作目录的引导种子；协议语义
+# 记录在治理平面（ADR/GOVERNANCE），删除本仓不影响协议存续。
+version: 1
+
+protocol:
+  heartbeat_interval_min: 30
+  lease_ttl_min: 60
+
+# pending —— 待认领工作项（当前为空）。条目结构：
+#   - id: WI-0001
+#     title: 一句话工作描述
+#     source: pm-self | issue | adr-followup
+#     anchor: "幂等锚（与 dispatch run_id 同语义）"
+#     created_at: "2026-08-25T00:00:00+00:00"
+pending: []
+
+# lease —— 当前认领租约（同一时刻至多一条活跃）
+lease:
+  active: false
+  holder: null          # 认领者标识（PM 会话/账号）
+  anchor: null          # 幂等锚：认领与派单共用，判重依据
+  claimed_at: null
+  expires_at: null      # 租约期限（lease_ttl_min）；过期即失权、可被重新认领
+
+# heartbeat —— 执行心跳记录段（最近一次）
+heartbeat:
+  at: null
+  window: null          # 若已派发到 CNB 窗口，记录窗口号（issue n）
+  note: ""
+
+# history —— 完成/放弃/超时条目归档（append-only，供审计）
+history: []
+
+# ── 协议五则 ─────────────────────────────────────────────────────────────
+# 1. 认领带租约：写 lease（holder+expires_at）才算占坑，租约内他人不得重派。
+# 2. 幂等：以 anchor 判重——同一工作只认领/派发一次，重入按 anchor 合并。
+# 3. 心跳续命：执行中每 heartbeat_interval_min 刷新 heartbeat.at，静默即弃单。
+# 4. 心跳退出即释放：完成/放弃/超时须清 lease、落 history，窗口随之可复用。
+# 5. 三段即证据链：pending / lease+heartbeat / history 构成可审计全过程。

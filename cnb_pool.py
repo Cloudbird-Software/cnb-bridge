@@ -197,7 +197,18 @@ class CnbClient:
                              {"title": title, "body": body or "调度窗口：本 issue 即一次任务通道（@CodeBuddy 评论触发 NPC，回复后窗口回到空闲）"})
 
     def comments(self, issue_n: int) -> list:
-        return self._request(f"{self.base}/-/issues/{issue_n}/comments?page_size=50") or []
+        """全量分页（实测 2026-08-25：单页 50 会漏最新评论——旧窗口评论数百条，
+        派单回复落在末页；只取第一页=collect 恒看旧评论误判超时）。"""
+        out, page = [], 1
+        while True:
+            batch = self._request(
+                f"{self.base}/-/issues/{issue_n}/comments?page_size=100&page={page}") or []
+            out.extend(batch)
+            if len(batch) < 100:
+                return out
+            page += 1
+            if page > 50:   # 5000 条上限护栏（异常窗口防死循环）
+                return out
 
     def last_comment(self, issue_n: int) -> dict | None:
         cs = self.comments(issue_n)

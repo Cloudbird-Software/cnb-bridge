@@ -220,8 +220,8 @@ class TestClient(unittest.TestCase):
             self.client.post_comment(7, "@CodeBuddy x", work_mode=True)
         self.assertIn("https://api.cnb.cool/Cloudbird-Software/talk/-/issues?page_size=200",
                       fake.calls)
-        self.assertIn("https://api.cnb.cool/Cloudbird-Software/talk/-/issues/7/comments?page_size=50",
-                      fake.calls)
+        self.assertIn("https://api.cnb.cool/Cloudbird-Software/talk/-/issues/7/comments?page_size=100&page=1",
+                      fake.calls)   # 全量分页（实测教训：单页 50 漏最新评论）
         self.assertIn("https://api.cnb.cool/Cloudbird-Software/-/charge/quota",
                       fake.calls)
         self.assertIn("https://api.cnb.cool/Cloudbird-Software/talk/-/issues/7/comments",

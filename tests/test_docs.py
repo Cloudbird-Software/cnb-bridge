@@ -24,29 +24,21 @@ PINNED_ACTIONS = {
 
 class TestADRFormat(unittest.TestCase):
     def setUp(self):
-        self.text = (REPO_ROOT / "ADR-0086-cnb-token-decision.md").read_text(
-            encoding="utf-8")
+        # ADR-0085 家园单仓化：ADR 正本在 archive/adr/（本仓只留引用）。
+        # 本地断言改为：RUNBOOK 引用 ADR-0086 + archive 路径正确标注
+        self.text = (REPO_ROOT / "RUNBOOK.md").read_text(encoding="utf-8")
 
     def test_org_adr_format(self):
-        """组织 ADR 格式：H1 编号行 / - status: 行 / ## 背景 / ## 决策 / ## 后果。"""
-        first = self.text.splitlines()[0]
-        self.assertTrue(re.match(r"^# ADR-\d{4}: \S", first), first)
-        self.assertRegex(self.text, r"(?m)^- status: accepted")
-        for section in ("## 背景", "## 决策", "## 后果"):
-            self.assertIn(section, self.text)
+        """ADR-0086 归档引用：RUNBOOK 含编号引用 + archive/adr 路径（ADR-0085 家园单仓化——本仓不留正本副本）。"""
+        self.assertRegex(self.text, r"ADR-0086")
+        self.assertIn("archive/adr/ADR-0086", self.text)
 
     def test_adr_substance(self):
-        """决策内容锚点：高权限保持 / 三层缓解 / 泄漏应急三步 / RUNBOOK 引用
-        / IR-0004 DECISION-01 / ADR-0085 关联。"""
-        self.assertIn("管理简单性优先", self.text)
-        self.assertIn("org secret", self.text)
+        """决策内容锚点（经 RUNBOOK 的泄漏应急三步传导）：吊销/轮换/审计三步 + org secret 纪律。"""
         self.assertIn("吊销", self.text)
         self.assertIn("轮换", self.text)
         self.assertIn("审计", self.text)
-        self.assertIn("RUNBOOK.md", self.text)
-        self.assertIn("IR-0004", self.text)
-        self.assertIn("DECISION-01", self.text)
-        self.assertIn("ADR-0085", self.text)
+        self.assertIn("org secret", self.text)
 
 
 class TestWeeklyAuditWorkflow(unittest.TestCase):
@@ -109,7 +101,7 @@ class TestNoTokenLiteral(unittest.TestCase):
         """新增源码/工作流不得出现任何 token 形态字面量（含已知泄漏形态）。"""
         for name in ("ledger.py", "work_inbox.py", "audit_extra.py",
                      ".github/workflows/weekly-audit.yml", "RUNBOOK.md",
-                     "README-ADD.md", "ADR-0086-cnb-token-decision.md"):
+                     "README-ADD.md"):   # ADR-0086 正本在 archive/adr（本仓无副本）
             src = (REPO_ROOT / name).read_text(encoding="utf-8")
             self.assertIsNone(re.search(r"Bearer [A-Za-z0-9]{16,}", src), name)
             self.assertIsNone(re.search(r"ghp_[A-Za-z0-9]{20,}", src), name)

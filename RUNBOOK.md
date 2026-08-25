@@ -6,7 +6,7 @@
 > 规范化），纠错仅以追加方式（INV-05）。
 >
 > 硬纪律：token 永不入仓、永不入命令行明文、永不进 agent 上下文——只经
-> org secret / 环境变量 `CNB_TOKEN_<ALIAS>`（ADR-0086 缓解条款）。
+> org secret / 环境变量 `CNB_TOKEN_<ALIAS>`（[ADR-0086](https://github.com/Cloudbird-Software/archive/blob/main/adr/ADR-0086-cnb-token-decision.md) 缓解条款；正本=archive/adr/ADR-0086-cnb-token-decision.md，ADR-0085 家园单仓化）。
 
 ## 0. 台账规范（四流程共用）
 

@@ -1,0 +1,110 @@
+name: weekly-audit
+# =============================================================================
+# cnb-bridge 周审计编排（IR-0004 AC-18 五项之三补全：政策 diff / 产物真实性
+# 抽样 / 配额汇总；D 组卡 #317-#321 收尾件）
+#
+# 硬注释（改动前必读）：
+#   - fail-closed（INV-04）：任一通道查询失败（网络/API/token/解析）= 报告
+#     overall=red 且 audit_extra.py 退出码 1 → 本 job 红。告警条目（政策变更/
+#     抽样作废/对账偏差）是检测成功的产出，不改红绿——走 issue 处置。
+#   - 判定永不外置（INV-02）：本审计只核资源面与产物真实性锚串，不消费
+#     NPC 输出作为任何 gate 输入；沙箱自报数字不采信（INV-01）。
+#   - 凭据纪律（INV-06 / ADR-0086 缓解）：token 只经 org secret 注入本步
+#     进程 env（不落 GITHUB_ENV/日志/摘要）；secret 引用静态出现在表达式
+#     中（GH Actions 无法动态索引 secrets）——加账号 = owner 加 org secret
+#     + 本 env 映射加一行（C1 PR，与 cnb-dispatch 同模式）。
+#   - 台账真源=GitHub 侧：本地 audit-state/ 仅暂存；usage.jsonl 变更由 PM
+#     随 PR 并回本仓（见 ledger.py 头注），本工作流只读不写仓。
+#   - actions 白名单（CI-2）：仅 checkout + setup-python（均为 org 白名单
+#     SHA 钉版）；报告 artifact 经 runner 内建 runtime API 上传（无第三方
+#     action），上传通道不可用时回退 step summary 并打 warn——报告面保底
+#     不静默。
+# =============================================================================
+on:
+  schedule:
+    - cron: "31 6 * * 1"   # 周一 06:31 UTC 错峰（避 cnb-audit 03:41 / archive 周扫 04:23-05:00 谱系）
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: weekly-audit
+  cancel-in-progress: false
+
+jobs:
+  weekly-audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout（本仓：脚本/审计状态基线随仓）
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1（org 白名单 CI-2）
+        with:
+          persist-credentials: false   # zizmor artipacked：不持久化凭据
+
+      - name: Setup Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0（org 白名单 CI-2）
+        with:
+          python-version: "3.12"
+
+      # ------------------------------------------------------------------
+      # 周审计全项（audit_extra.py）：政策 diff + 产物抽样 + 配额汇总
+      # （ledger snapshot/reconcile/verify）。任一通道失败 → 退出码 1 →
+      # 本 step 红（fail-closed）。抽样目录 fanout/products 不存在属"零消费
+      # 非红"（AC-13），由脚本判定，不在 YAML 预检。
+      # token 只进本步进程 env（env 映射同 cnb-dispatch 模式；上两步零凭据）。
+      # ------------------------------------------------------------------
+      - name: audit（全项，fail-closed）
+        env:
+          CNB_TOKEN_XUEMEI: ${{ secrets.CNB_TOKEN_XUEMEI }}
+          CNB_TOKEN_P11: ${{ secrets.CNB_TOKEN_P11 }}
+        run: |
+          set -euo pipefail
+          python audit_extra.py \
+            --state-dir audit-state \
+            --sample-dir fanout/products \
+            --sample-pct 10 \
+            --threshold-pct 10 \
+            --out weekly-report.json | tee weekly-report.out
+          # 报告面兜底：报告全文进 step summary（run 页面即审计证据，防 artifact 通道失效）
+          {
+            echo '## CNB 周审计报告（weekly-audit）'
+            echo
+            echo '```json'
+            cat weekly-report.json
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # ------------------------------------------------------------------
+      # 报告 artifact：runner 内建 runtime API 直传（actions 限定
+      # checkout/setup-python，不引入 upload-artifact）。上传失败仅告警不
+      # 掩盖审计结果（报告已入 step summary 与 run 日志）。
+      # ------------------------------------------------------------------
+      - name: attach-report（artifact，always——红 run 更需留报告）
+        if: always()
+        run: |
+          set -uo pipefail
+          [[ -f weekly-report.json ]] || { echo '::warn::无报告文件（audit 步未产出）'; exit 0; }
+          python3 - <<'EOF'
+          import os, sys, urllib.parse, urllib.request
+          name, path = "weekly-audit-report", "weekly-report.json"
+          url = os.environ.get("ACTIONS_RUNTIME_URL", "").rstrip("/")
+          tok = os.environ.get("ACTIONS_RUNTIME_TOKEN", "")
+          if not url or not tok:
+              print(f"::warn::runtime 凭据不可用——artifact 未上传（报告已入 step summary/run 日志）")
+              sys.exit(0)
+          data = open(path, "rb").read()
+          u = (f"{url}/_apis/artifacts/upload?"
+               f"artifactName={urllib.parse.quote(name)}&api-version=6.0-preview.1")
+          req = urllib.request.Request(u, data=data, method="PUT", headers={
+              "Authorization": f"Bearer {tok}",
+              "Content-Type": "application/octet-stream",
+              "Content-Length": str(len(data)),
+              "Accept": "application/json"})
+          try:
+              with urllib.request.urlopen(req, timeout=120) as r:
+                  r.read()
+              print(f"::notice::artifact {name} 已上传（{len(data)} 字节，runtime API）")
+          except Exception as e:
+              print(f"::warn::artifact 上传失败（{e}）——报告已入 step summary/run 日志")
+          EOF

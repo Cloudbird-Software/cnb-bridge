@@ -76,6 +76,12 @@ class DispatchError(AccountPoolError):
     """派单失败：档位非法、超出单账号并发上限、全部窗口占用等。"""
 
 
+# 无可用账号统一报错文案（pick/dispatch 共用，防双写漂移）
+_NO_AVAILABLE_ACCOUNT_MSG = (
+    "无可用账号：需至少一个 status=active 且 token 环境变量已注入的账号"
+)
+
+
 def _warn(msg: str) -> None:
     sys.stderr.write(f"[cnb_pool] 警告: {msg}\n")
 
@@ -326,6 +332,14 @@ class AccountPool:
                 return a
         raise AccountPoolError(f"未知账号别名: {account!r}（登记于 accounts.yaml）")
 
+    def _require_usable(self, alias, acct: Account) -> None:
+        """指定账号必须 status=active 且 token 已注入——否则报错（文案含调用方传入别名）。"""
+        if not self._usable(acct):
+            raise AccountPoolError(
+                f"账号 {alias} 不可用（status={acct.status} 或环境变量 "
+                f"{acct.secret_ref} 未注入）"
+            )
+
     def token_for(self, account: str | Account) -> str:
         """token 从 os.environ[secret_ref] 取；缺失即抛错（无任何硬编码 fallback）。"""
         acct = self.by_alias(account)
@@ -350,30 +364,34 @@ class AccountPool:
         return [a for a in self.accounts if self._usable(a)]
 
     # ── 调度 ──
+    def _least_busy_account(self, accounts: list):
+        """逐账号查窗口占用，选当前占用最少者（并列取登记顺序）。
+
+        返回 (account, 该账号窗口状态列表)。每账号恰好一次 windows_status
+        查询——调用方须复用返回的状态，不得对同一账号重查。
+        """
+        best: Account | None = None
+        best_busy = -1
+        best_statuses: list = []
+        for a in accounts:
+            st = windows_status(self.client_for(a))
+            busy = busy_count(st)
+            if best is None or busy < best_busy:
+                best, best_busy, best_statuses = a, busy, st
+        return best, best_statuses
+
     def pick(self, prefer: str | None = None) -> Account:
         """选派单账号。prefer 指定别名（必须可用）；默认在可用账号中选
         当前占用窗口数最少者（经 windows_status 计数；并列取登记顺序）。
         网络查询失败直接抛错（fail-closed，不降级猜数）。"""
         if prefer is not None:
             acct = self.by_alias(prefer)
-            if not self._usable(acct):
-                raise AccountPoolError(
-                    f"账号 {prefer} 不可用（status={acct.status} 或环境变量 "
-                    f"{acct.secret_ref} 未注入）"
-                )
+            self._require_usable(prefer, acct)
             return acct
         avail = self.available()
         if not avail:
-            raise AccountPoolError(
-                "无可用账号：需至少一个 status=active 且 token 环境变量已注入的账号"
-            )
-        best: Account | None = None
-        best_busy = -1
-        for a in avail:
-            busy = busy_count(windows_status(self.client_for(a)))
-            if best is None or busy < best_busy:
-                best, best_busy = a, busy
-        return best  # type: ignore[return-value]
+            raise AccountPoolError(_NO_AVAILABLE_ACCOUNT_MSG)
+        return self._least_busy_account(avail)[0]  # type: ignore[return-value]
 
     def _check_tier(self, tier: str, task_body: str) -> None:
         if tier not in TIER_RULES:
@@ -401,26 +419,14 @@ class AccountPool:
         run_id = run_id or secrets.token_hex(4)
         if account is not None:
             candidates = [self.by_alias(account)]
-            if not self._usable(candidates[0]):
-                raise AccountPoolError(
-                    f"账号 {account} 不可用（status={candidates[0].status} 或环境变量 "
-                    f"{candidates[0].secret_ref} 未注入）"
-                )
+            self._require_usable(account, candidates[0])
         else:
             candidates = self.available()
             if not candidates:
-                raise AccountPoolError(
-                    "无可用账号：需至少一个 status=active 且 token 环境变量已注入的账号"
-                )
-        chosen: Account | None = None
-        chosen_statuses: list = []
-        chosen_busy = -1
-        for a in candidates:  # 逐账号查占用，选最少者（指定 account 时仅一个）
-            st = windows_status(self.client_for(a))
-            b = busy_count(st)
-            if chosen is None or b < chosen_busy:
-                chosen, chosen_statuses, chosen_busy = a, st, b
+                raise AccountPoolError(_NO_AVAILABLE_ACCOUNT_MSG)
+        chosen, chosen_statuses = self._least_busy_account(candidates)
         assert chosen is not None
+        chosen_busy = busy_count(chosen_statuses)
         cap = self.dispatch_cfg["max_concurrent_per_account"]
         if chosen_busy >= cap:
             raise DispatchError(

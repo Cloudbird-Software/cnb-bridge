@@ -306,6 +306,13 @@ def _write_lease(model: dict, holder: str, item: dict, now: datetime,
     return lease
 
 
+def _clear_lease(model: dict) -> dict:
+    """清空租约（release/void 共用）：全字段置 null、active=False。"""
+    model["lease"] = {k: None for k in LEASE_FIELDS}
+    model["lease"]["active"] = False
+    return model["lease"]
+
+
 def _void_expired_lease(model: dict, now: datetime) -> dict | None:
     """原认领作废留痕（lease 过期被接管）：history 追加 voided 条目，清 lease。"""
     lease = model.get("lease") or {}
@@ -321,8 +328,7 @@ def _void_expired_lease(model: dict, now: datetime) -> dict | None:
         "note": "原认领作废留痕：租约到期未释放，被接管（协议五则 #1/#2）",
     }
     model.setdefault("history", []).append(entry)
-    model["lease"] = {k: None for k in LEASE_FIELDS}
-    model["lease"]["active"] = False
+    _clear_lease(model)
     return entry
 
 
@@ -433,8 +439,7 @@ def release(inbox_path: str | Path, list_id: str, outcome: str = "done",
         "released_at": _iso(now), "outcome": outcome, "note": note,
     }
     model.setdefault("history", []).append(entry)
-    model["lease"] = {k: None for k in LEASE_FIELDS}
-    model["lease"]["active"] = False
+    _clear_lease(model)
     _heartbeat(model, now, note="释放即心跳退出（协议五则 #4）")
     atomic_write_text(path, render_inbox(model))
     return {"action": "release", "item": {"list_id": cur_key,

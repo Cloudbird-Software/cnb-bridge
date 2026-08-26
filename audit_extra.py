@@ -92,21 +92,32 @@ def _iso(dt: datetime) -> str:
     return dt.isoformat(timespec="seconds")
 
 
-def _atomic_append_jsonl(path: Path, entry: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    lines = [ln for ln in (path.read_text(encoding="utf-8").splitlines()
-                           if path.is_file() else []) if ln.strip()]
+def _atomic_write_text(path: Path, text: str, mkdir: bool = False) -> None:
+    """原子写：同目录 .tmp + fsync + os.replace；中途失败原文件完好、不留残 tmp。
+
+    mkdir=True 时先建父目录（仅 jsonl 追加通道需要；其余调用方保持原有
+    目录假设不变）。
+    """
+    if mkdir:
+        path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".tmp")
     try:
         with open(tmp, "w", encoding="utf-8", newline="\n") as f:
-            f.write("".join(ln + "\n" for ln in lines) +
-                    json.dumps(entry, ensure_ascii=False) + "\n")
+            f.write(text)
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp, path)
     finally:
         if tmp.exists():
             tmp.unlink()
+
+
+def _atomic_append_jsonl(path: Path, entry: dict) -> None:
+    lines = [ln for ln in (path.read_text(encoding="utf-8").splitlines()
+                           if path.is_file() else []) if ln.strip()]
+    body = "".join(ln + "\n" for ln in lines) + \
+        json.dumps(entry, ensure_ascii=False) + "\n"
+    _atomic_write_text(path, body, mkdir=True)
 
 
 # ────────────────────────── ① 政策监测 ──────────────────────────
@@ -184,16 +195,8 @@ def check_policy(state_dir: Path) -> dict:
         (pages_dir / f"{key}.html").write_bytes(body)
         pages.append(row)
     if not errors:
-        tmp = baseline_path.with_name(baseline_path.name + ".tmp")
-        try:
-            with open(tmp, "w", encoding="utf-8", newline="\n") as f:
-                json.dump(baseline, f, ensure_ascii=False, indent=2)
-                f.flush()
-                os.fsync(f.fileno())
-            os.replace(tmp, baseline_path)
-        finally:
-            if tmp.exists():
-                tmp.unlink()
+        _atomic_write_text(baseline_path,
+                           json.dumps(baseline, ensure_ascii=False, indent=2))
     return {"status": "red" if errors else "green", "pages": pages,
             "alerts": alerts, "errors": errors}
 
@@ -381,17 +384,7 @@ def main(argv: list[str] | None = None) -> int:
     text = json.dumps(r, ensure_ascii=False, indent=2)
     print(text)
     if args.out:
-        out = Path(args.out)
-        tmp = out.with_name(out.name + ".tmp")
-        try:
-            with open(tmp, "w", encoding="utf-8", newline="\n") as f:
-                f.write(text + "\n")
-                f.flush()
-                os.fsync(f.fileno())
-            os.replace(tmp, out)
-        finally:
-            if tmp.exists():
-                tmp.unlink()
+        _atomic_write_text(Path(args.out), text + "\n")
     return 0 if r.get("overall") == "green" else 1
 
 

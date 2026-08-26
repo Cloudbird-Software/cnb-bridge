@@ -160,11 +160,12 @@ def verify_chain(path: Path) -> dict:
     台账文件不存在=尚未建立（首次 --snapshot 前为空属正常，ok True 附 note）；
     真源在 GitHub 侧，本地缺失以远端 git 历史恢复。
     """
+    lines = _read_lines(path)
     if not path.is_file():
         return {"ok": True, "entries": 0, "first_bad_line": None,
                 "note": f"{path.name} 尚未建立（首次 --snapshot 前为空属正常）"}
     prev = GENESIS_HASH
-    for i, ln in enumerate(_read_lines(path), 1):
+    for i, ln in enumerate(lines, 1):
         try:
             obj = json.loads(ln)
         except json.JSONDecodeError as e:
@@ -181,7 +182,7 @@ def verify_chain(path: Path) -> dict:
             return {"ok": False, "entries": i - 1, "first_bad_line": i,
                     "reason": f"第 {i} 行 hash 与内容不符（内容被篡改或手工改行未重算）"}
         prev = obj["hash"]
-    return {"ok": True, "entries": len(_read_lines(path)), "first_bad_line": None}
+    return {"ok": True, "entries": len(lines), "first_bad_line": None}
 
 
 # ────────────────────────── 配额解析与 build logs 口径 ──────────────────────────

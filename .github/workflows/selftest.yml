@@ -1,6 +1,9 @@
 name: gate
 
 on:
+  merge_group:
+    # ADR-0042：merge queue 必需订阅
+    types: [checks_requested]
   pull_request:
   push:
     branches: [main]
@@ -9,6 +12,11 @@ permissions:
   contents: read
 
 jobs:
+  hygiene:
+    # CI-4（enforced）：zizmor 工作流安全审计 + 大文件/密钥样文件巡检——可复用
+    # 工作流统一实现（accounts.yaml 仅 secret_ref 引用，无明文凭据面）
+    uses: Cloudbird-Software/CI-Workflows/.github/workflows/hygiene.yml@61191f87c537f6e887695517121c6e530a838261 # v1
+
   selftest:
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -25,3 +33,23 @@ jobs:
         run: python -m py_compile cnb_pool.py
       - name: unittest
         run: python -m unittest discover -s tests -v
+
+  gate:
+    # 严格聚合器（ADR-0032：skipped≠success）——产出 ruleset required check
+    # "gate" 上下文（此前唯一 job 名为 selftest，required check 永不满足）
+    if: always()
+    needs: [selftest, hygiene]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: All required jobs green?
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          echo "$NEEDS"
+          OK=$(echo "$NEEDS" | jq -r 'to_entries | all(.value.result == "success")')
+          if [[ "$OK" != "true" ]]; then
+            echo "::error::gate 上游未全绿（skipped≠success：严格断言——ADR-0032）"; exit 1
+          fi

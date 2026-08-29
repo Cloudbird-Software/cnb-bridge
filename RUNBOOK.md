@@ -184,3 +184,63 @@ python cnb_pool.py collect --account newbot --window <N> --run-id canary01
 
 > 本节为 ADR-0086 缓解条款③的执行细则；三步完成前该账号视为不可信，
 > `accounts.yaml` 置 `status: degraded` 阻断调度。
+
+## 5. selfcloud 内网调度器 v0（IR-0006 W2-C1 / 卡 #412 / ADR-0103 决策 4）
+
+> 服务器侧 Go 调度器：消费 Job Contract、worker 池内短票据签发（TTL≤波次）、
+> egress allowlist 与无状态约束执法。判定与验收锚 GitHub（INV-02：本调度器=
+> 可删除执行层，删除断言见 REMOVAL.md §selfcloud）。
+
+### 5.1 部署位与构建
+
+代码=本仓 `selfcloud/`（Go module `cloudbird/software/selfcloud`），构建产物
+部署到公网服务器（内网调度器宿主，assets-register `public-server`）：
+
+```bash
+cd selfcloud && go vet ./... && go test ./...   # 测试先行（AC 锚）
+go build -o /usr/local/bin/selfcloud .
+```
+
+### 5.2 日常流程（一次作业）
+
+1. **契约校验**（fail-closed：非法即 exit 3，不签票据不拨号）：
+
+   ```bash
+   selfcloud validate --contract job.json --allowlist api.github.com,vault.internal
+   # 执法点：schema v1 / card join key 形态 / TTL≤240min（波次上限）/
+   #         persistent_state=false + state_volumes=[]（无状态约束）/
+   #         egress_needs ⊆ 环境 allowlist
+   ```
+
+2. **短票据签发**（worker 零持久凭据；HMAC 密钥从内网 Vault 注入 `--key-file`，
+   密钥值永不进 git/agent 上下文——INV-04）：
+
+   ```bash
+   selfcloud issue-ticket --contract job.json --key-file /vault/selfcloud-hmac.key
+   ```
+
+3. **worker 执行完毕票据到期自动失效**；到期前显式收回则提前 revoke。
+
+4. **事件入统一账本**（schema v1 链式，与 .github 仓 evidence_shadow.py
+   逐字节兼容——跨语言一致由 ledger_test.go 金向量锚定）：
+
+   ```bash
+   selfcloud emit-ledger --file tickets.jsonl --event-file grant.json
+   selfcloud emit-ledger --file tickets.jsonl --event-file revoke.json
+   python3 <.github 仓>/governance/evidence_shadow.py verify --file tickets.jsonl
+   ```
+
+   真实落盘：服务器持代签令牌将 `tickets.jsonl` 推送本仓 `tickets-ledger`
+   分支（append-only；供 evidence-query 统一查询按 subject 消费）。
+
+### 5.3 执法边界（AC-5a）
+
+- **egress allowlist**：worker 侧唯一出向通道经 `EgressPolicy.GuardDial`——
+  目的主机不在环境白名单即拒连（`worker 不直连公网`）；白名单真源=
+  env 定义仓 `environments/*.yaml` 的 `network.egress_allowlist`，v0 经
+  `--allowlist` 注入。
+- **无状态约束**：`persistent_state=true` 或 `state_volumes` 非空 → 拒置
+  （云电脑池 worker 每作业重置，state 只能存 git/artifacts/内网 blob）。
+- **票据 TTL**：签发时 TTL=契约 `ttl_minutes`（上限 240=波次租约上限，
+  对齐 arbiter capabilities.yaml defaults.ttl_minutes）；过期即失效，
+  验签 `now > expires_at` → 拒（BEH-05"票据是瞬时能力"）。

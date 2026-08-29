@@ -283,13 +283,24 @@ func cmdGhTokenRevoke(args []string) int {
 	} else {
 		reason = "ttl-expired"
 	}
-	// 收回断言：探活必 401（机械锚点——沙箱/LLM 不判定，HTTP 状态码判定）
+	// 收回断言：探活必 401（机械锚点——沙箱/LLM 不判定，HTTP 状态码判定）。
+	// GitHub 侧 DELETE→失效存在秒级传播延迟（run 33250323872 实测：204 后 ~0.3s
+	// 仍 200）——退避轮询至 401；超时仍非 401=红（fail-closed，无默认绿）。
+	const (
+		retryWait   = 3 * time.Second
+		retryBudget = 90 * time.Second
+	)
+	deadline := time.Now().Add(retryBudget)
 	st, err := ProbeToken(*apiBase, *token, *repo)
+	for err == nil && st != 401 && time.Now().Before(deadline) {
+		time.Sleep(retryWait)
+		st, err = ProbeToken(*apiBase, *token, *repo)
+	}
 	if err != nil {
 		return fail(3, "收回后探活失败: %v", err)
 	}
 	if st != 401 {
-		return fail(3, "收回断言失败：探活 HTTP %d（预期 401——令牌未死=红）", st)
+		return fail(3, "收回断言失败：探活 HTTP %d（预期 401——%v 内令牌未死=红）", st, retryBudget)
 	}
 	fmt.Fprintf(os.Stderr, "OK 收回断言：探活 HTTP 401（令牌已失效，reason=%s——AC-6b 断言日志）\n", reason)
 	if *ledger != "" {

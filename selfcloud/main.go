@@ -14,8 +14,13 @@ import (
 //	selfcloud issue-ticket  --contract c.json --key-file k.bin [--ts RFC3339]
 //	selfcloud verify-ticket --key-file k.bin --token <token> [--ts RFC3339]
 //	selfcloud emit-ledger   --file f.jsonl --event-file e.json
+//	selfcloud gh-token      --app-id N --key-file k.pem --org O --repo R --card o/r#n
+//	                         [--ledger f.jsonl] [--api base] [--expect-token]（W2-C2 代签）
+//	selfcloud gh-token-check  --token <t> --repo o/r [--api base]（断言：200=有效）
+//	selfcloud gh-token-revoke --token <t> --card o/r#n --repo o/r [--ledger f.jsonl]
+//	                         [--api base]（提前收回 + 401 收回断言日志）
 //
-// 退出码：0=成功 | 3=执法拒绝（契约非法/egress 越界/票据无效——fail-closed）
+// 退出码：0=成功 | 3=执法拒绝（契约非法/egress 越界/票据无效/令牌断言失败——fail-closed）
 func main() {
 	if len(os.Args) < 2 {
 		usage()
@@ -31,6 +36,12 @@ func main() {
 		rc = cmdVerifyTicket(os.Args[2:])
 	case "emit-ledger":
 		rc = cmdEmitLedger(os.Args[2:])
+	case "gh-token":
+		rc = cmdGhToken(os.Args[2:])
+	case "gh-token-check":
+		rc = cmdGhTokenCheck(os.Args[2:])
+	case "gh-token-revoke":
+		rc = cmdGhTokenRevoke(os.Args[2:])
 	default:
 		usage()
 		rc = 2
@@ -39,7 +50,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "用法: selfcloud <validate|issue-ticket|verify-ticket|emit-ledger> [flags]")
+	fmt.Fprintln(os.Stderr, "用法: selfcloud <validate|issue-ticket|verify-ticket|emit-ledger|gh-token|gh-token-check|gh-token-revoke> [flags]")
 }
 
 func fail(rc int, format string, a ...any) int {
@@ -165,6 +176,129 @@ func cmdEmitLedger(args []string) int {
 		return fail(3, "%v", err)
 	}
 	fmt.Println("OK append 1 行（链式）")
+	return 0
+}
+
+// cmdGhToken 代签单仓作用域短 TTL 安装令牌（W2-C2 / AC-6a）。
+// 令牌值仅 stdout 交付（--expect-token=必须输出令牌给调用方消费的 drill 模式；
+// 缺省只输出去敏感化的元信息）；账本事件（若有 --ledger）零令牌值。
+func cmdGhToken(args []string) int {
+	fs := flag.NewFlagSet("gh-token", flag.ExitOnError)
+	appID := fs.String("app-id", "", "GitHub App ID（cloudbrid-agent）")
+	keyFile := fs.String("key-file", "", "App 私钥 PEM 文件（Vault 注入路径）")
+	org := fs.String("org", "Cloudbird-Software", "目标组织（installation 定位）")
+	repo := fs.String("repo", "", "单仓作用域目标仓（如 .github）")
+	card := fs.String("card", "", "绑定卡 join key（台账 subject.card 口径）")
+	ledger := fs.String("ledger", "", "schema v1 账本 jsonl（token.grant 事件落账）")
+	apiBase := fs.String("api", "https://api.github.com", "GitHub API base（drill 可指向桩）")
+	expectToken := fs.Bool("expect-token", false, "stdout 输出令牌 JSON（调用方消费；缺省只输元信息）")
+	fs.Parse(args)
+	if *appID == "" || *keyFile == "" || *repo == "" || *card == "" {
+		return fail(2, "--app-id/--key-file/--repo/--card 必填")
+	}
+	if !cardRe.MatchString(*card) {
+		return fail(3, "--card 形态须为 owner/repo#n（join key）")
+	}
+	keyPEM, err := os.ReadFile(*keyFile)
+	if err != nil {
+		return fail(2, "读私钥失败: %v", err)
+	}
+	key, err := LoadPrivateKey(keyPEM)
+	if err != nil {
+		return fail(3, "%v", err)
+	}
+	now := time.Now().UTC()
+	jwt, err := AppJWT(key, *appID, now)
+	if err != nil {
+		return fail(3, "%v", err)
+	}
+	installID, err := FindInstallation(*apiBase, jwt, *org)
+	if err != nil {
+		return fail(3, "%v", err)
+	}
+	mt, err := MintToken(*apiBase, jwt, installID, *repo, *card, now)
+	if err != nil {
+		return fail(3, "%v", err)
+	}
+	if *ledger != "" {
+		if err := EmitTokenEvent(*ledger, "token.grant", *card, *repo, mt.ExpiresAt,
+			map[string]string{"ttl_minutes": fmt.Sprintf("%d", int(mt.ExpiresAt.Sub(now).Minutes()))}, now); err != nil {
+			return fail(3, "token.grant 入账失败: %v", err)
+		}
+		fmt.Fprintf(os.Stderr, "OK token.grant 入账（%s，payload 零令牌值）\n", *ledger)
+	}
+	if *expectToken {
+		b, _ := json.Marshal(mt)
+		fmt.Println(string(b)) // 令牌一次性交付（不落 stderr/账本）
+	} else {
+		fmt.Fprintf(os.Stderr, "OK 令牌已签发：作用域=单仓 %s，到期=%s，TTL=%dm（≤波次）\n",
+			*repo, mt.ExpiresAt.Format(time.RFC3339), int(mt.ExpiresAt.Sub(now).Minutes()))
+	}
+	return 0
+}
+
+// cmdGhTokenCheck 令牌断言（AC-6b 收回断言锚点）：200=有效（exit 0）；
+// 401=已收回/已过期（exit 3——断言日志即 FAIL 行）。
+func cmdGhTokenCheck(args []string) int {
+	fs := flag.NewFlagSet("gh-token-check", flag.ExitOnError)
+	token := fs.String("token", "", "待断言令牌")
+	repo := fs.String("repo", "", "作用域仓 owner/name（探活端点）")
+	apiBase := fs.String("api", "https://api.github.com", "GitHub API base")
+	fs.Parse(args)
+	if *token == "" || *repo == "" {
+		return fail(2, "--token 与 --repo 必填")
+	}
+	st, err := ProbeToken(*apiBase, *token, *repo)
+	if err != nil {
+		return fail(3, "%v", err)
+	}
+	if st == 200 {
+		fmt.Fprintln(os.Stderr, "OK 令牌有效（HTTP 200）")
+		return 0
+	}
+	return fail(3, "令牌已收回/已过期（HTTP %d——收回断言成立，fail-closed）", st)
+}
+
+// cmdGhTokenRevoke 收回 + 断言 + token.revoke 入账。
+// 缺省=提前收回（DELETE /installation/token → 204）；--expired-only=到期收回
+// 断言模式（TTL 已到，令牌应已自动失效——跳过 DELETE，探活必 401）。
+func cmdGhTokenRevoke(args []string) int {
+	fs := flag.NewFlagSet("gh-token-revoke", flag.ExitOnError)
+	token := fs.String("token", "", "待收回令牌")
+	card := fs.String("card", "", "绑定卡 join key")
+	repo := fs.String("repo", "", "作用域仓 owner/name")
+	ledger := fs.String("ledger", "", "schema v1 账本 jsonl（token.revoke 事件落账）")
+	apiBase := fs.String("api", "https://api.github.com", "GitHub API base")
+	expiredOnly := fs.Bool("expired-only", false, "到期收回断言模式（跳过 DELETE，断言 401）")
+	fs.Parse(args)
+	if *token == "" || *card == "" || *repo == "" {
+		return fail(2, "--token/--card/--repo 必填")
+	}
+	reason := "revoked"
+	if !*expiredOnly {
+		if err := RevokeToken(*apiBase, *token); err != nil {
+			return fail(3, "%v", err)
+		}
+		fmt.Fprintln(os.Stderr, "OK DELETE /installation/token → 204（提前收回）")
+	} else {
+		reason = "ttl-expired"
+	}
+	// 收回断言：探活必 401（机械锚点——沙箱/LLM 不判定，HTTP 状态码判定）
+	st, err := ProbeToken(*apiBase, *token, *repo)
+	if err != nil {
+		return fail(3, "收回后探活失败: %v", err)
+	}
+	if st != 401 {
+		return fail(3, "收回断言失败：探活 HTTP %d（预期 401——令牌未死=红）", st)
+	}
+	fmt.Fprintf(os.Stderr, "OK 收回断言：探活 HTTP 401（令牌已失效，reason=%s——AC-6b 断言日志）\n", reason)
+	if *ledger != "" {
+		if err := EmitTokenEvent(*ledger, "token.revoke", *card, *repo, time.Time{},
+			map[string]string{"reason": reason}, time.Now().UTC()); err != nil {
+			return fail(3, "token.revoke 入账失败: %v", err)
+		}
+		fmt.Fprintf(os.Stderr, "OK token.revoke 入账（%s）\n", *ledger)
+	}
 	return 0
 }
 

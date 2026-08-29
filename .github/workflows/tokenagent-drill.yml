@@ -1,0 +1,151 @@
+name: tokenagent-drill
+# PM 凭证收敛真实演练（IR-0006 W2-C2 / 卡 #413 / AC-6b 运行时证据）：
+#   用 org secrets（CB_APP_ID/AGENT_APP_SECRET——Actions secret 面，PM 上下文
+#   零接触，INV-04）走真实全链路：
+#     代签（单仓作用域+短 TTL）→ 探活 200 → 收回（revoke=DELETE+401 断言 /
+#     expiry=等 TTL 到期+401 断言）→ token.grant/revoke 事件链式入
+#     tickets.jsonl → push tickets-ledger 分支（evidence-query 第 5 源可查）。
+#   令牌值全程 ::add-mask::，账本 payload 零令牌值。
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "收回模式：revoke=提前收回（快）；expiry=等 TTL 到期自动收回（约 65 分钟）"
+        type: choice
+        default: revoke
+        options: [revoke, expiry]
+      card:
+        description: "绑定卡 join key（台账 subject.card）"
+        default: "Cloudbird-Software/.github#413"
+
+permissions:
+  contents: write   # push tickets-ledger（append-only 账本分支）
+
+concurrency:
+  group: tokenagent-drill
+  cancel-in-progress: false   # expiry 模式含 1h 等待：取消会留半程证据，排队不取消
+
+jobs:
+  drill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90        # expiry 模式：1h TTL + 断言 + 入账推送
+    env:
+      CARD: ${{ inputs.card }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false   # zizmor artipacked：不持久化凭据
+
+      - name: Setup Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: selfcloud/go.mod
+
+      - name: Build selfcloud
+        run: |
+          cd selfcloud
+          go vet ./...
+          go test ./...
+          go build -o "$RUNNER_TEMP/selfcloud" .
+
+      - name: Fetch existing ledger (tickets-ledger 分支，append-only 续链)
+        run: |
+          if gh api "repos/Cloudbird-Software/cnb-bridge/contents/tickets.jsonl?ref=tickets-ledger" \
+              >"$RUNNER_TEMP/meta.json" 2>/dev/null; then
+            python3 - "$RUNNER_TEMP/meta.json" tickets.jsonl <<'EOF'
+            import base64, json, sys
+            d = json.load(open(sys.argv[1], encoding="utf-8"))
+            open(sys.argv[2], "w", encoding="utf-8", newline="\n").write(
+                base64.b64decode(d["content"]).decode("utf-8"))
+            print(f"续链：拉到既有账本 {d['size']}B")
+            EOF
+          else
+            touch tickets.jsonl
+            echo "tickets-ledger 尚无 tickets.jsonl（创世追加）"
+          fi
+
+      - name: Mint scoped token (org secrets——App 私钥只在 Actions secret 面)
+        env:
+          CB_APP_ID: ${{ secrets.CB_APP_ID }}
+          AGENT_APP_SECRET: ${{ secrets.AGENT_APP_SECRET }}
+        run: |
+          printf '%s' "$AGENT_APP_SECRET" > "$RUNNER_TEMP/key.pem"
+          chmod 600 "$RUNNER_TEMP/key.pem"
+          "$RUNNER_TEMP/selfcloud" gh-token \
+            --app-id "$CB_APP_ID" --key-file "$RUNNER_TEMP/key.pem" \
+            --repo cnb-bridge --card "$CARD" \
+            --ledger tickets.jsonl --expect-token > "$RUNNER_TEMP/token.json"
+          TOKEN=$(jq -r .token "$RUNNER_TEMP/token.json")
+          echo "::add-mask::$TOKEN"
+          echo "代签完成：作用域=单仓 cnb-bridge，TTL=$(jq -r .expires_at "$RUNNER_TEMP/token.json")（1h≤波次 240min）"
+
+      - name: Probe token (断言 200)
+        run: |
+          TOKEN=$(jq -r .token "$RUNNER_TEMP/token.json")
+          "$RUNNER_TEMP/selfcloud" gh-token-check \
+            --token "$TOKEN" --repo Cloudbird-Software/cnb-bridge
+
+      - name: Revoke token (DELETE + 401 收回断言)
+        if: inputs.mode == 'revoke'
+        run: |
+          TOKEN=$(jq -r .token "$RUNNER_TEMP/token.json")
+          "$RUNNER_TEMP/selfcloud" gh-token-revoke \
+            --token "$TOKEN" --card "$CARD" \
+            --repo Cloudbird-Software/cnb-bridge --ledger tickets.jsonl
+
+      - name: Wait for TTL expiry (~1h) then assert auto-revocation
+        if: inputs.mode == 'expiry'
+        run: |
+          EXP=$(jq -r .expires_at "$RUNNER_TEMP/token.json")
+          WAIT=$(( $(date -u -d "$EXP" +%s) + 60 - $(date -u +%s) ))
+          echo "等待 TTL 到期（${WAIT}s）——GitHub 侧到期自动收回（AC-6b：TTL 到期，Then 自动收回）"
+          sleep "$WAIT"
+          TOKEN=$(jq -r .token "$RUNNER_TEMP/token.json")
+          # --expired-only：跳过 DELETE（已死无需收）；断言探活必 401 + token.revoke(ttl-expired) 入账
+          "$RUNNER_TEMP/selfcloud" gh-token-revoke \
+            --token "$TOKEN" --card "$CARD" \
+            --repo Cloudbird-Software/cnb-bridge --ledger tickets.jsonl --expired-only
+
+      - name: Verify hash chain before push (fail-closed：链断不推)
+        run: |
+          python3 - tickets.jsonl <<'EOF'
+          import hashlib, json, sys
+          prev = None
+          for i, ln in enumerate(open(sys.argv[1], encoding="utf-8"), 1):
+              rec = json.loads(ln)
+              assert rec["seq"] == i, f"seq 断: 第{i}行 seq={rec['seq']}"
+              assert rec["prev_hash"] == prev, f"prev_hash 断: 第{i}行"
+              h = rec.pop("hash")
+              canon = json.dumps(rec, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+              assert hashlib.sha256(canon.encode()).hexdigest() == h, f"hash 断: 第{i}行"
+              prev = h
+          print(f"OK 链完整（{i} 行）——可推送")
+          EOF
+
+      - name: Push tickets-ledger (append-only 账本分支)
+        run: |
+          python3 - tickets.jsonl "$RUNNER_TEMP/payload.json" <<'EOF'
+          import base64, json, sys
+          b = open(sys.argv[1], "rb").read()
+          json.dump({"message": "tokenagent-drill: token grant/revoke 事件入账（schema v1 链式）",
+                     "content": base64.b64encode(b).decode(), "branch": "tickets-ledger"},
+                    open(sys.argv[2], "w"))
+          EOF
+          # 已有文件须带 sha（append-only 更新）；分支未建则直接创建
+          SHA=$(gh api "repos/Cloudbird-Software/cnb-bridge/contents/tickets.jsonl?ref=tickets-ledger" \
+              -q .sha 2>/dev/null || true)
+          if [[ -n "$SHA" ]]; then
+            jq --arg sha "$SHA" '. + {sha: $sha}' "$RUNNER_TEMP/payload.json" > "$RUNNER_TEMP/payload2.json"
+            gh api -X PUT "repos/Cloudbird-Software/cnb-bridge/contents/tickets.jsonl" \
+              --input "$RUNNER_TEMP/payload2.json" -q .commit.sha
+          else
+            gh api -X PUT "repos/Cloudbird-Software/cnb-bridge/contents/tickets.jsonl" \
+              --input "$RUNNER_TEMP/payload.json" -q .commit.sha
+          fi
+          echo "OK tickets-ledger 已更新（evidence-query 第 5 源按 subject 可查）"
+
+      - name: Cleanup (密钥与令牌临时文件)
+        if: always()
+        run: rm -f "$RUNNER_TEMP/key.pem" "$RUNNER_TEMP/token.json" "$RUNNER_TEMP/payload.json" "$RUNNER_TEMP/payload2.json"

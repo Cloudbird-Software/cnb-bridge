@@ -45,6 +45,11 @@ selfcloud/ 是云内网执行面调度器 v0，独立于 CNB 桥接，单独按�
    归档后删除（判定层历史记录在 .github/archive 仓 evidence/ 的部分不随删）。
 4. **.github 仓 providers.yaml**：`self-cloud-pool` 条目的 entry/note 按需更新
    （条目本身属于资产申报，由 W1-C1 的资产登记簿管辖，不随本节删）。
+5. **PM 凭证代签面（W2-C2）**：删除本仓工作流 `tokenagent-drill.yml` 与
+   selfcloud 的 gh-token/gh-token-revoke/gh-token-check 子命令；org secrets
+   `CB_APP_ID`/`AGENT_APP_SECRET` **不随删**（conductor 等治理工作流共用——
+   属治理平面凭据面，非本调度器私有）。PM 凭证回退至 gh-app-token.sh
+   本地机制（收敛前形态，语义不变）。
 
 ### 删除断言（AC-5b / INV-02）
 

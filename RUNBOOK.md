@@ -244,3 +244,52 @@ go build -o /usr/local/bin/selfcloud .
 - **票据 TTL**：签发时 TTL=契约 `ttl_minutes`（上限 240=波次租约上限，
   对齐 arbiter capabilities.yaml defaults.ttl_minutes）；过期即失效，
   验签 `now > expires_at` → 拒（BEH-05"票据是瞬时能力"）。
+
+## 6. PM 凭证收敛：GitHub App 令牌服务器代签（IR-0006 W2-C2 / 卡 #413）
+
+> 目标态（AC-6a/INV-04）：PM 会话在云电脑上零长期凭据——写仓令牌由服务器
+> 用 cloudbrid-agent App 私钥（Vault 注入 `--key-file`，密钥值永不进
+> git/agent 上下文）代签：单仓作用域（`repositories` 限定，不提供全安装
+> 作用域模式）+ 短 TTL（GitHub 固定 1h ≤ 波次 240min，`MintToken` 越界即拒）。
+> 个人 PAT 退出日常流程，仅留应急回退通道（见 .github 仓
+> `docs/pm-credential-convergence.md`：App 失效→owner PAT，24h 窗口）。
+
+### 6.1 日常流程（PM 会话取令牌）
+
+```bash
+# 服务器侧（PM 会话经内网调服务器执行；密钥在服务器，PM 只收令牌）：
+selfcloud gh-token --app-id $CB_APP_ID --key-file /vault/cloudbrid-agent.pem \
+  --repo .github --card Cloudbird-Software/.github#<n> \
+  --ledger /var/lib/selfcloud/tickets.jsonl --expect-token
+# stdout 一次性交付 {"token":"ghs_…","expires_at":"…","repo":"…"}（不落日志/账本）
+# token.grant 事件已入账（payload 只含 repo/expires_at/ttl，零令牌值）
+
+# PM 会话侧消费：
+export GH_TOKEN=<上一步交付的 token>   # 1h 后自动失效；提前收回见 6.2
+gh pr create ...                       # 身份=cloudbrid-agent[bot]，ruleset 照样生效
+```
+
+### 6.2 收回语义（AC-6b：收回断言日志）
+
+```bash
+# 提前收回（作业完成即收回，不等 TTL）：
+selfcloud gh-token-revoke --token <t> --card o/r#n --repo o/r \
+  --ledger /var/lib/selfcloud/tickets.jsonl
+#   → DELETE /installation/token（204）+ 探活断言 HTTP 401 + token.revoke 入账
+
+# TTL 到期自动收回断言（GitHub 侧到期即失效；到期后探活必 401）：
+selfcloud gh-token-revoke --token <t> --card o/r#n --repo o/r \
+  --ledger /var/lib/selfcloud/tickets.jsonl --expired-only
+#   → 跳过 DELETE（已死无需收）；断言 401 + token.revoke(reason=ttl-expired) 入账
+
+# 单纯断言（不动账本）：
+selfcloud gh-token-check --token <t> --repo o/r   # 200=有效（exit 0）/ 401=已收回（exit 3）
+```
+
+### 6.3 真实演练（drill 工作流）
+
+`selfcloud-tokenagent-drill.yml`（本仓）：workflow_dispatch 手动触发，用 org
+secrets（`CB_APP_ID`/`AGENT_APP_SECRET`，Actions secret 面注入——PM 上下文
+零接触）走真实全链路：代签→探活 200→（revoke 模式：DELETE+401 断言 /
+expiry 模式：等 TTL 到期+401 断言）→事件链式入 `tickets.jsonl`→push
+`tickets-ledger` 分支（evidence-query 第 5 源按 subject 可查）。

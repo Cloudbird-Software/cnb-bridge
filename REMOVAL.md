@@ -32,3 +32,26 @@
 - 步骤 4 产生的终止 ADR 本身（历史不可变）；
 - work-inbox 协议语义（IR-0004 D16）——若协议仍在用，其登记处迁回治理平面，
   仅失去本仓这份种子文件。
+
+## §selfcloud 内网调度器（W2-C1 / 卡 #412 / ADR-0103 决策 4）
+
+selfcloud/ 是云内网执行面调度器 v0，独立于 CNB 桥接，单独按下序删除：
+
+1. **停止调度器进程**（公网服务器上的 `selfcloud` 二进制）；在途短票据
+   自然到期失效（TTL≤240min），无需吊销面——票据无撤销列表，过期即死。
+2. **删除本仓 `selfcloud/` 目录**与服务器上的二进制、HMAC 密钥
+   （内网 Vault 的 `selfcloud-hmac` 路径一并删）。
+3. **tickets-ledger 分支**：历史事件已按 schema v1 链式入账，分支可整体
+   归档后删除（判定层历史记录在 .github/archive 仓 evidence/ 的部分不随删）。
+4. **.github 仓 providers.yaml**：`self-cloud-pool` 条目的 entry/note 按需更新
+   （条目本身属于资产申报，由 W1-C1 的资产登记簿管辖，不随本节删）。
+
+### 删除断言（AC-5b / INV-02）
+
+- **gate / org-gate / conductor**：三者输入集均为治理平面文件，
+  从未包含 selfcloud 二进制/tickets-ledger/短票据——删除零影响
+  （断言记录：org 内全仓搜索 `selfcloud`、`tickets-ledger` 仅命中本仓与
+  providers.yaml 注记，治理判定文件零命中）。
+- **统一账本**：票据 grant/revoke 事件是 schema v1 的普通记录源之一，
+  源消失=该源停止追加，既有链与 evidence-query 其余源不受影响
+  （fail-closed：源缺席≠链断）。

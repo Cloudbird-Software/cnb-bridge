@@ -8,12 +8,20 @@ accounts:
     status: pending-access   # 2026-08-25 实测：token 有效但对 talk 窗口仓 404——需 owner 在 CNB 侧
                              # 将其加入 Cloudbird-Software 组（或对 talk 授权）后置 active
     added_at: "2026-08-25"
+    scope:                   # 2026-09-06 权限面实测（IR-0010 探针 run 34027551317/34027415631）
+      org_repo_create: false   # POST /{org}/-/repos → 403
+      quota_read: false        # GET /{org}/-/charge/quota → 403
+      repo_window_ops: true    # 窗口派单/回收（待 talk 授权后生效）
   - alias: p11
     secret_ref: CNB_TOKEN_P11
     description: 第二账号（令牌名 11）
     quota_monthly_core_hours: 1600
     status: active
     added_at: "2026-08-25"
+    scope:                   # 2026-09-06 权限面实测（IR-0010）
+      org_repo_create: true    # POST /{org}/-/repos → 201（stronghold 即此账号所建）
+      quota_read: true         # GET /{org}/-/charge/quota → 200
+      repo_window_ops: true    # W35 实弹全链（窗口 #207 NPC 执行）
 dispatch:
   repo: Cloudbird-Software/talk
   windows: "#1-#100（issue 即窗口）"
